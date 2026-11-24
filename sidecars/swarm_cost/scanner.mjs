@@ -22,6 +22,7 @@ const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi
 const QUOTA_ERROR_RE = /RESOURCE_EXHAUSTED|quota|\b429\b|exhausted your capacity|rate.?limit/i;
 const SCAN_TTL_MS = 2500;
 const QUOTA_TTL_MS = 15000;
+const TOOL_DEFS_TTL_MS = 30000;
 const QUOTA_TIMEOUT_MS = 1500;
 const COMPLETED_IDLE_MS = 30 * 60 * 1000;
 const WEEKLY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
@@ -34,6 +35,7 @@ const transcriptCache = new Map(); // path -> { statKey, analysis }
 const contextCache = new Map();    // path -> { statKey, payload }
 let scanCache = { builtAt: 0, appDataDirs: [], swarmsById: new Map(), orderedIds: [], weeklyLocalUsage: null };
 let quotaCache = { fetchedAtMs: 0, payload: null };
+let toolDefsCache = { fetchedAtMs: 0, items: null };
 
 function safeReaddir(dirPath) {
   try {
@@ -1456,11 +1458,387 @@ function summarizeStepForContext(step, idx) {
   return { category: 'system_msg', label: step.type || `Step #${idx + 1}` };
 }
 
+const BUILTIN_TOOL_DEFS = [
+  { name: 'swarm', tokens: 780, description: 'Manage multi-agent swarm board, workers, models, and workspaces' },
+  { name: 'update_steps', tokens: 450, description: 'Live task checklist tracker shown to the user' },
+  { name: 'search_marketplace', tokens: 380, description: 'Search Agent Marketplace catalog for plugins and skills' },
+  { name: 'run_command', tokens: 330, description: 'Execute terminal commands in the workspace shell' },
+  { name: 'schedule', tokens: 310, description: 'Schedule one-shot timers or recurring cron jobs' },
+  { name: 'invoke_subagent', tokens: 300, description: 'Launch an isolated background subagent with its own prompt' },
+  { name: 'write_file', tokens: 260, description: 'Create, overwrite, or append files and artifacts' },
+  { name: 'edit_file', tokens: 250, description: 'Perform targeted single-block replacements in existing files' },
+  { name: 'run_workflow', tokens: 220, description: 'Execute Python multi-agent orchestration workflow scripts' },
+  { name: 'swarm_wait', tokens: 185, description: 'Sleep until another swarm member posts to the message board' },
+  { name: 'read_board', tokens: 170, description: 'Read messages and roster status from the swarm board' },
+  { name: 'list_plugin_accounts', tokens: 165, description: 'List authenticated accounts for installed plugins' },
+  { name: 'update_focus', tokens: 155, description: 'Update the live high-level status summary in the UI' },
+  { name: 'manage_task', tokens: 150, description: 'List, inspect, send input to, or kill background tasks' },
+  { name: 'read_file', tokens: 145, description: 'Read text, image, PDF, video, or audio files with line bounds' },
+  { name: 'ask_question', tokens: 140, description: 'Ask the user structured multiple-choice clarification questions' },
+  { name: 'exit_plan_mode', tokens: 140, description: 'Submit finalized plan and switch to execution turn' },
+  { name: 'define_subagent', tokens: 125, description: 'Define a reusable custom subagent type with tool permissions' },
+  { name: 'manage_subagents', tokens: 120, description: 'List or terminate active direct subagents' },
+  { name: 'search_web', tokens: 85, description: 'Search the web for documentation, APIs, and facts' },
+  { name: 'send_message', tokens: 80, description: 'Send a direct message to another agent or subagent' },
+  { name: 'post_message', tokens: 70, description: 'Post a message onto the shared swarm board' },
+];
+
+function sanitizeDefDescription(text, maxLen = 100) {
+  if (typeof text !== 'string' || !text.trim()) return '';
+  let s = text
+    .replace(/[A-Za-z]:\\[^\s)'"`]+/g, '<path>')
+    .replace(/\/(?:Users|home)\/[^\s)'"`]+/g, '<path>')
+    .replace(/\s+/g, ' ')
+    .trim();
+  if (s.length > maxLen) s = s.slice(0, maxLen - 1) + '…';
+  return s;
+}
+
+function parseFrontmatterMeta(mdText) {
+  if (typeof mdText !== 'string') return { name: '', description: '' };
+  const m = mdText.match(/^---\s*\r?\n([\s\S]*?)\r?\n---/);
+  if (!m) return { name: '', description: '' };
+  const yaml = m[1];
+  let name = '';
+  let description = '';
+  const nameMatch = yaml.match(/^name:\s*(.+)$/m);
+  if (nameMatch) name = nameMatch[1].trim().replace(/^["']|["']$/g, '');
+  const lines = yaml.split(/\r?\n/);
+  for (let i = 0; i < lines.length; i++) {
+    const dm = lines[i].match(/^description:\s*(.*)$/);
+    if (!dm) continue;
+    const first = dm[1].trim();
+    if (first === '>' || first === '>-' || first === '|' || first === '|-') {
+      const acc = [];
+      for (let j = i + 1; j < lines.length; j++) {
+        if (/^\s+/.test(lines[j])) acc.push(lines[j].trim());
+        else break;
+      }
+      description = acc.join(' ');
+    } else {
+      description = first.replace(/^["']|["']$/g, '');
+    }
+    break;
+  }
+  return { name, description };
+}
+
+function scanSkillsInDir(skillsDir, group, seenNames, out) {
+  for (const dirName of safeReaddir(skillsDir)) {
+    const mdPath = join(skillsDir, dirName, 'SKILL.md');
+    const txt = safeReadUtf8(mdPath);
+    if (!txt) continue;
+    const meta = parseFrontmatterMeta(txt);
+    const name = meta.name || dirName;
+    if (seenNames.has(name)) continue;
+    seenNames.add(name);
+    const headerLine = `- ${name} (${mdPath}): ${meta.description || ''}`;
+    out.push({
+      id: `skill:${group}:${name}`,
+      name,
+      kind: 'skill',
+      group,
+      tokens: estimateTokensFromText(headerLine),
+      bodyTokens: estimateTokensFromText(txt),
+      source: 'measured',
+      description: sanitizeDefDescription(meta.description || ''),
+      matchPaths: [mdPath.replace(/\\/g, '/').toLowerCase()],
+    });
+  }
+}
+
+async function collectToolDefinitions({ force = false } = {}) {
+  const nowMs = Date.now();
+  if (!force && toolDefsCache.items && nowMs - toolDefsCache.fetchedAtMs < TOOL_DEFS_TTL_MS) {
+    return toolDefsCache.items;
+  }
+
+  const items = [];
+  for (const t of BUILTIN_TOOL_DEFS) {
+    items.push({
+      id: `builtin:${t.name}`,
+      name: t.name,
+      kind: 'builtin_tool',
+      group: 'builtin',
+      tokens: t.tokens,
+      bodyTokens: 0,
+      source: 'builtin_ref',
+      description: t.description,
+      matchPaths: [],
+    });
+  }
+
+  const seenSkillNames = new Set();
+  const seenRulePaths = new Set();
+  const seenMcpKeys = new Set();
+  let gotPluginsFromLs = false;
+
+  const lsAddr = process.env.ANTIGRAVITY_LS_ADDRESS;
+  const csrf = process.env.ANTIGRAVITY_CSRF_TOKEN;
+  if (lsAddr && csrf) {
+    try {
+      const base = lsAddr.startsWith('http://') || lsAddr.startsWith('https://') ? lsAddr : `http://${lsAddr}`;
+      const res = await fetch(`${base}/exa.language_server_pb.LanguageServerService/GetAllPlugins`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-codeium-csrf-token': csrf },
+        body: '{}',
+        signal: AbortSignal.timeout(QUOTA_TIMEOUT_MS),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const plugins = Array.isArray(data?.plugins) ? data.plugins : [];
+        gotPluginsFromLs = true;
+        for (const p of plugins) {
+          if (!p || p.disabled) continue;
+          const group = p.name || 'plugin';
+
+          for (const s of Array.isArray(p.skills) ? p.skills : []) {
+            if (!s?.name || seenSkillNames.has(s.name)) continue;
+            seenSkillNames.add(s.name);
+            const sPath = typeof s.path === 'string' ? s.path : '';
+            const headerLine = `- ${s.name}${sPath ? ` (${sPath})` : ''}: ${s.description || ''}`;
+            items.push({
+              id: `skill:${group}:${s.name}`,
+              name: s.name,
+              kind: 'skill',
+              group,
+              tokens: estimateTokensFromText(headerLine),
+              bodyTokens: estimateTokensFromText(typeof s.content === 'string' ? s.content : ''),
+              source: 'measured',
+              description: sanitizeDefDescription(s.description || ''),
+              matchPaths: sPath ? [sPath.replace(/\\/g, '/').toLowerCase()] : [],
+            });
+          }
+
+          for (const r of Array.isArray(p.rules) ? p.rules : []) {
+            const abs = typeof r?.absolutePath === 'string' ? r.absolutePath : '';
+            if (!abs || seenRulePaths.has(abs.toLowerCase())) continue;
+            seenRulePaths.add(abs.toLowerCase());
+            const content = safeReadUtf8(abs);
+            if (!content) continue;
+            const rName = basename(abs);
+            items.push({
+              id: `rule:${group}:${rName}`,
+              name: rName,
+              kind: 'rule',
+              group,
+              tokens: estimateTokensFromText(content),
+              bodyTokens: 0,
+              source: 'measured',
+              description: sanitizeDefDescription(content.slice(0, 140)),
+              matchPaths: [abs.replace(/\\/g, '/').toLowerCase()],
+            });
+          }
+
+          for (const m of Array.isArray(p.mcpServers) ? p.mcpServers : []) {
+            const mName = m?.serverName || m?.originalServerName || '';
+            if (!mName || seenMcpKeys.has(mName.toLowerCase())) continue;
+            seenMcpKeys.add(mName.toLowerCase());
+            items.push({
+              id: `mcp:${group}:${mName}`,
+              name: m.originalServerName || mName,
+              kind: 'mcp',
+              group,
+              tokens: 400,
+              bodyTokens: 0,
+              source: 'estimated',
+              description: sanitizeDefDescription(`MCP server from plugin ${group}`),
+              matchPaths: [],
+              mcpServerPrefix: mName,
+            });
+          }
+        }
+      }
+    } catch {
+      // Fall back to disk discovery below.
+    }
+  }
+
+  const configRoot = join(homedir(), '.gemini', 'config');
+  if (!gotPluginsFromLs) {
+    const pluginsDir = join(configRoot, 'plugins');
+    for (const pDir of safeReaddir(pluginsDir)) {
+      const pRoot = join(pluginsDir, pDir);
+      const manifestRaw = safeReadUtf8(join(pRoot, 'plugin.json'));
+      let pName = pDir;
+      if (manifestRaw) {
+        try {
+          const pj = JSON.parse(manifestRaw);
+          if (pj?.disabled) continue;
+          if (typeof pj?.name === 'string' && pj.name.trim()) pName = pj.name.trim();
+        } catch {
+          // Ignore malformed JSONC/JSON.
+        }
+      }
+      scanSkillsInDir(join(pRoot, 'skills'), pName, seenSkillNames, items);
+      const ruleFile = join(pRoot, 'rules', 'AGENTS.md');
+      if (!seenRulePaths.has(ruleFile.toLowerCase())) {
+        const rTxt = safeReadUtf8(ruleFile);
+        if (rTxt) {
+          seenRulePaths.add(ruleFile.toLowerCase());
+          items.push({
+            id: `rule:${pName}:AGENTS.md`,
+            name: 'AGENTS.md',
+            kind: 'rule',
+            group: pName,
+            tokens: estimateTokensFromText(rTxt),
+            bodyTokens: 0,
+            source: 'measured',
+            description: sanitizeDefDescription(rTxt.slice(0, 140)),
+            matchPaths: [],
+          });
+        }
+      }
+    }
+  }
+
+  // Scan built-in skills and standalone user skills/rules/MCP on disk.
+  for (const appData of findAppDataDirs()) {
+    scanSkillsInDir(join(appData, 'builtin', 'skills'), 'builtin', seenSkillNames, items);
+  }
+  scanSkillsInDir(join(configRoot, 'skills'), 'user', seenSkillNames, items);
+
+  for (const rName of ['GEMINI.md', 'AGENTS.md']) {
+    const rp = join(configRoot, rName);
+    if (seenRulePaths.has(rp.toLowerCase())) continue;
+    const txt = safeReadUtf8(rp);
+    if (txt && txt.trim()) {
+      seenRulePaths.add(rp.toLowerCase());
+      items.push({
+        id: `rule:user:${rName}`,
+        name: rName,
+        kind: 'rule',
+        group: 'user',
+        tokens: estimateTokensFromText(txt),
+        bodyTokens: 0,
+        source: 'measured',
+        description: sanitizeDefDescription(txt.slice(0, 140)),
+        matchPaths: [],
+      });
+    }
+  }
+
+  const mcpCfgRaw = safeReadUtf8(join(configRoot, 'mcp_config.json'));
+  if (mcpCfgRaw && mcpCfgRaw.trim()) {
+    try {
+      const cfg = JSON.parse(mcpCfgRaw);
+      const servers = cfg?.mcpServers && typeof cfg.mcpServers === 'object' ? cfg.mcpServers : {};
+      for (const [sName, sCfg] of Object.entries(servers)) {
+        if (!sCfg || sCfg.disabled || seenMcpKeys.has(sName.toLowerCase())) continue;
+        seenMcpKeys.add(sName.toLowerCase());
+        items.push({
+          id: `mcp:user:${sName}`,
+          name: sName,
+          kind: 'mcp',
+          group: 'user',
+          tokens: 400,
+          bodyTokens: 0,
+          source: 'estimated',
+          description: 'User-configured MCP server',
+          matchPaths: [],
+          mcpServerPrefix: sName,
+        });
+      }
+    } catch {
+      // Ignore invalid mcp_config.json.
+    }
+  }
+
+  toolDefsCache = { fetchedAtMs: nowMs, items };
+  return items;
+}
+
+function buildToolDefinitionsSummary(baseItems, { toolCallCounts, loadedSkillPaths, usedTokens, contextWindow }) {
+  const enriched = baseItems.map((it) => {
+    let usedInSession = 0;
+    let tokens = it.tokens;
+    if (it.kind === 'builtin_tool') {
+      usedInSession = toolCallCounts.get(it.name) || 0;
+    } else if (it.kind === 'skill') {
+      if (it.matchPaths?.some((p) => loadedSkillPaths.has(p))) {
+        usedInSession = 1;
+      }
+    } else if (it.kind === 'mcp') {
+      const prefix = (it.mcpServerPrefix || it.name || '').toLowerCase();
+      let mcpTools = 0;
+      for (const [tName, cnt] of toolCallCounts.entries()) {
+        if (prefix && tName.toLowerCase().includes(prefix)) {
+          usedInSession += cnt;
+          mcpTools++;
+        }
+      }
+      if (mcpTools > 0) tokens = Math.max(tokens, mcpTools * 220);
+    }
+    return {
+      id: it.id,
+      name: it.name,
+      kind: it.kind,
+      group: it.group,
+      tokens,
+      bodyTokens: it.bodyTokens || 0,
+      usedInSession,
+      source: it.source,
+      description: it.description || '',
+    };
+  });
+
+  const totalTokens = enriched.reduce((acc, x) => acc + x.tokens, 0);
+  const counts = { total: enriched.length, builtin_tool: 0, skill: 0, rule: 0, mcp: 0 };
+  const kindMap = new Map();
+  const groupMap = new Map();
+
+  for (const x of enriched) {
+    if (counts[x.kind] !== undefined) counts[x.kind]++;
+    const kEntry = kindMap.get(x.kind) || { kind: x.kind, count: 0, tokens: 0 };
+    kEntry.count++;
+    kEntry.tokens += x.tokens;
+    kindMap.set(x.kind, kEntry);
+
+    const gKey = `${x.kind}:${x.group}`;
+    const gEntry = groupMap.get(gKey) || { group: x.group, kind: x.kind, count: 0, tokens: 0 };
+    gEntry.count++;
+    gEntry.tokens += x.tokens;
+    groupMap.set(gKey, gEntry);
+  }
+
+  const byKind = [...kindMap.values()]
+    .map((k) => ({
+      ...k,
+      percent: totalTokens > 0 ? roundPercent((k.tokens / totalTokens) * 100) : 0,
+    }))
+    .sort((a, b) => b.tokens - a.tokens);
+
+  const byGroup = [...groupMap.values()]
+    .map((g) => ({
+      ...g,
+      percent: totalTokens > 0 ? roundPercent((g.tokens / totalTokens) * 100) : 0,
+    }))
+    .sort((a, b) => b.tokens - a.tokens);
+
+  const items = enriched
+    .map((x) => ({
+      ...x,
+      shareOfDefsPercent: totalTokens > 0 ? roundPercent((x.tokens / totalTokens) * 100) : 0,
+      shareOfContextPercent: usedTokens > 0 ? roundPercent((x.tokens / usedTokens) * 100) : 0,
+    }))
+    .sort((a, b) => b.tokens - a.tokens || b.usedInSession - a.usedInSession || a.name.localeCompare(b.name));
+
+  return {
+    totalTokens,
+    shareOfContextPercent: usedTokens > 0 ? roundPercent((totalTokens / usedTokens) * 100) : 0,
+    shareOfLimitPercent: contextWindow > 0 ? roundPercent((totalTokens / contextWindow) * 100) : 0,
+    counts,
+    byKind,
+    byGroup,
+    items,
+  };
+}
+
 /**
  * Build the `GET /api/context?conversationId=...` payload strictly for one conversation.
  * Never falls back to another conversation if conversationId is missing or not found.
  */
-export function getConversationContext({ conversationId = '', force = false } = {}) {
+export async function getConversationContext({ conversationId = '', force = false } = {}) {
   const convId = typeof conversationId === 'string' ? conversationId.trim() : '';
   const nowIso = new Date().toISOString();
 
@@ -1520,6 +1898,9 @@ export function getConversationContext({ conversationId = '', force = false } = 
       // Skip partial trailing line while an agent is actively writing.
     }
   }
+
+  const toolCallCounts = new Map();
+  const loadedSkillPaths = new Set();
 
   let title = '';
   let startedMs = 0;
@@ -1605,6 +1986,17 @@ export function getConversationContext({ conversationId = '', force = false } = 
     plannerSteps++;
     const calls = Array.isArray(step.tool_calls) ? step.tool_calls : [];
     toolCalls += calls.length;
+    for (const tc of calls) {
+      const tName = typeof tc?.name === 'string' ? tc.name.trim() : '';
+      if (!tName) continue;
+      toolCallCounts.set(tName, (toolCallCounts.get(tName) || 0) + 1);
+      if (tName === 'read_file') {
+        const pArg = tc?.args?.Path || tc?.arguments?.Path || tc?.input?.Path || '';
+        if (typeof pArg === 'string' && pArg.toLowerCase().endsWith('skill.md')) {
+          loadedSkillPaths.add(pArg.replace(/\\/g, '/').toLowerCase());
+        }
+      }
+    }
 
     const stepModel =
       (typeof step.model === 'string' && step.model.trim()) ||
@@ -1809,6 +2201,14 @@ export function getConversationContext({ conversationId = '', force = false } = 
     .sort((a, b) => b.estimatedTokens - a.estimatedTokens)
     .slice(0, 8);
 
+  const rawDefs = await collectToolDefinitions({ force });
+  const toolDefinitions = buildToolDefinitionsSummary(rawDefs, {
+    toolCallCounts,
+    loadedSkillPaths,
+    usedTokens,
+    contextWindow,
+  });
+
   const payload = {
     generatedAt: nowIso,
     cached: false,
@@ -1835,6 +2235,7 @@ export function getConversationContext({ conversationId = '', force = false } = 
     composition,
     history,
     heavySteps,
+    toolDefinitions,
   };
 
   if (contextCache.size >= MAX_CONTEXT_CACHE) {

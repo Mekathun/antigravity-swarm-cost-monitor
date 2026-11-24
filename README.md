@@ -31,7 +31,7 @@ Account-level quota tools only show overall pool percentages. When running multi
 - **Strictly Scoped to Active Conversation**: Tracks only the conversation open in the current pane (never mixes other threads).
 - **Exact Fill Meter & Thresholds**: Displays `used / limit`, remaining headroom, 60% / 80% markers, cache-hit rate, and proactive `/compact` advice above 75%.
 - **Composition Breakdown**: Breaks down active context into **System Prompt & Tool Schemas**, **Tool Calls & Outputs**, **Assistant Responses**, **Thinking / Reasoning**, **User Messages**, and **System Notices**.
-- **Turn-by-Turn Growth Chart & Top Consumers**: Visualizes context growth + compaction markers across turns, and ranks the Top 8 heaviest steps in the active window.
+- **Turn-by-Turn Growth Chart & Tool Definitions Inspector**: Visualizes context growth + compaction markers across turns, ranks which **built-in tools, skills, rules, and MCP servers** consume the most definition tokens, and includes a **View All** drawer with category filters, By-Plugin grouping, and live search.
 
 ### 3. Docked Live Quota Monitor & Settings
 - **Bottom-Left Dock (Directly Above Settings)**:

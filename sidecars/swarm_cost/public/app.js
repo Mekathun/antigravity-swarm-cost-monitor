@@ -52,6 +52,10 @@ const state = {
   context: null,
   contextErr: null,
   lastContextSig: '',
+  drawerMode: 'pricing',   // pricing | toolDefs
+  tdFilter: 'all',         // all | builtin_tool | skill | rule | mcp
+  tdView: 'items',         // items | groups
+  tdSearch: '',
 };
 
 const VALID_QSIZES = ['mini', 'compact', 'expanded'];
@@ -715,6 +719,55 @@ const CTX_CAT_META = {
   system_msg: { color: '#d9a52b', zh: '系统通知与注入', en: 'System Notices' },
 };
 
+const TD_KIND_META = {
+  builtin_tool: { color: '#4c8df6', zh: '内置工具', en: 'Built-in' },
+  skill: { color: '#a774e0', zh: '技能定义', en: 'Skill' },
+  rule: { color: '#2fae8e', zh: '常驻规则', en: 'Rule' },
+  mcp: { color: '#e8875b', zh: 'MCP 服务', en: 'MCP' },
+};
+
+function tdItemTip(it, totalDefs) {
+  const km = TD_KIND_META[it.kind] || { zh: it.kind, en: it.kind };
+  const lines = [
+    `${it.name} · ${isEn() ? km.en : km.zh} (${it.group})`,
+    L(
+      `定义占用 ~${fmtInt(it.tokens)} tok（占全部定义 ${fmtPct(it.shareOfDefsPercent)}% · 占当前上下文 ${fmtPct(it.shareOfContextPercent)}%）`,
+      `~${fmtInt(it.tokens)} tok (${fmtPct(it.shareOfDefsPercent)}% of defs · ${fmtPct(it.shareOfContextPercent)}% of context)`
+    ),
+  ];
+  if (it.bodyTokens > 0) {
+    lines.push(L(`完整 SKILL.md 正文约 ${fmtTok(it.bodyTokens)} tok（按需加载）`, `Full SKILL.md body ~${fmtTok(it.bodyTokens)} tok (loaded on demand)`));
+  }
+  if (it.usedInSession > 0) {
+    lines.push(it.kind === 'skill'
+      ? L('本会话已读取加载此技能', 'Loaded in this conversation')
+      : L(`本会话已调用 ${fmtInt(it.usedInSession)} 次`, `Called ${fmtInt(it.usedInSession)}x in this conversation`));
+  }
+  if (it.description) lines.push(it.description);
+  if (it.source === 'builtin_ref') lines.push(L('注：内置工具按参数规模参考估算', 'Note: built-in schema weight is a reference estimate'));
+  else if (it.source === 'estimated') lines.push(L('注：MCP 工具数按基础估值计算', 'Note: MCP schema weight is estimated'));
+  return lines.join('\n');
+}
+
+function tdRowHtml(it, maxTok, showContextPct = false) {
+  const km = TD_KIND_META[it.kind] || { color: '#8a94a6', zh: it.kind, en: it.kind };
+  const kLabel = isEn() ? km.en : km.zh;
+  const barPct = maxTok > 0 ? clamp((num(it.tokens) / maxTok) * 100, 0, 100) : 0;
+  const usedBadge = it.usedInSession > 0
+    ? `<span class="badge exact">${esc(it.kind === 'skill' ? L('已加载', 'Loaded') : `×${fmtInt(it.usedInSession)}`)}</span>`
+    : '';
+  return `<div class="td-row" data-tip="${esc(tdItemTip(it))}">
+    <span class="badge" style="color:${km.color};background:color-mix(in srgb,${km.color} 14%,transparent)">${esc(kLabel)}</span>
+    <span class="td-main">
+      <span class="td-name mono">${esc(it.name)}</span>
+      <span class="td-group">${esc(it.group)}</span>
+      ${usedBadge}
+    </span>
+    <span class="td-val num">${fmtTok(it.tokens)} <span class="muted">(${fmtPct(it.shareOfDefsPercent)}%${showContextPct && it.shareOfContextPercent > 0 ? ` · ctx ${fmtPct(it.shareOfContextPercent)}%` : ''})</span></span>
+    <span class="bar"><i style="width:${barPct}%;background:${km.color}"></i></span>
+  </div>`;
+}
+
 function renderContextChart(history, limit, compactCount) {
   if (!Array.isArray(history) || history.length < 2) {
     return `<div class="empty sm">${esc(L('至少需要 2 次模型调用后才会绘制上下文增长曲线。', 'Context growth chart appears after 2+ model turns.'))}</div>`;
@@ -800,7 +853,15 @@ function renderContext() {
     return;
   }
 
-  const sig = JSON.stringify([state.settings.language, ctx.conversationId, ctx.current?.usedTokens, ctx.current?.model, ctx.sessionTotals?.steps]);
+  const sig = JSON.stringify([
+    state.settings.language,
+    ctx.conversationId,
+    ctx.current?.usedTokens,
+    ctx.current?.model,
+    ctx.sessionTotals?.steps,
+    ctx.toolDefinitions?.totalTokens,
+    ctx.toolDefinitions?.counts?.total,
+  ]);
   if (sig === state.lastContextSig && panel.firstElementChild) return;
   state.lastContextSig = sig;
 
@@ -824,7 +885,19 @@ function renderContext() {
     return `<span style="flex:${Math.max(0.01, c.tokens)} 1 0;background:${meta.color}" data-tip="${esc(`${lbl}\n${fmtTok(c.tokens)} tok · ${fmtPct(c.percent)}%`)}"></span>`;
   }).join('');
 
-  const heavy = Array.isArray(ctx.heavySteps) ? ctx.heavySteps : [];
+  const td = ctx.toolDefinitions || null;
+  const tdItems = Array.isArray(td?.items) ? td.items : [];
+  const tdTop = tdItems.slice(0, 8);
+  const tdMax = tdTop.length ? Math.max(...tdTop.map((x) => num(x.tokens)), 1) : 1;
+  const tdBar = (td?.byKind || []).map((k) => {
+    const km = TD_KIND_META[k.kind] || { color: '#8a94a6', zh: k.kind, en: k.kind };
+    const lbl = isEn() ? km.en : km.zh;
+    return `<span style="flex:${Math.max(0.01, k.tokens)} 1 0;background:${km.color}" data-tip="${esc(`${lbl} (${k.count})\n${fmtTok(k.tokens)} tok · ${fmtPct(k.percent)}%`)}"></span>`;
+  }).join('');
+  const tdGroupPills = (td?.byGroup || []).slice(0, 4).map((g) => {
+    const km = TD_KIND_META[g.kind] || { color: '#8a94a6' };
+    return `<span class="badge"><span class="swatch round" style="background:${km.color}"></span>${esc(g.group)} · ${fmtTok(g.tokens)} (${fmtPct(g.percent, 0)}%)</span>`;
+  }).join('');
   const adviceHtml = usedPct >= 75
     ? `<div class="ctx-advice${status === 'high' ? ' high' : ''}">
         ${icon('i-alert', 'sm')}
@@ -937,22 +1010,17 @@ function renderContext() {
 
     <section class="card">
       <div class="section-head">
-        <h3 class="section-title">${esc(L('高占用步骤 Top 8', 'Top Context Consumers'))} <span class="count num">${heavy.length}</span></h3>
+        <h3 class="section-title">${esc(L('工具定义占用', 'Tool Definitions'))} <span class="count num">${fmtInt(td?.counts?.total || tdItems.length)}</span></h3>
         <span class="spacer"></span>
-        <span class="section-note">${esc(L('当前活跃窗口内估算', 'Within active window'))}</span>
+        <span class="section-note num">${td ? esc(L(`${fmtTok(td.totalTokens)} tok · 占上下文 ${fmtPct(td.shareOfContextPercent)}%`, `${fmtTok(td.totalTokens)} tok · ${fmtPct(td.shareOfContextPercent)}% of ctx`)) : ''}</span>
+        ${tdItems.length ? `<button type="button" class="ghost-btn" data-act="open-tool-defs" style="height:24px;padding:0 8px;background:var(--c-fill);color:var(--c-fg)" data-testid="cost-td-view-all">${esc(L('查看全部', 'View All'))}</button>` : ''}
       </div>
-      <div class="ctx-heavy-list">
-        ${heavy.map((h) => {
-          const meta = CTX_CAT_META[h.category] || { color: '#8a94a6', zh: h.type, en: h.type };
-          const pct = clamp(num(h.sharePercent), 0, 100);
-          return `<div class="ctx-heavy-row" data-tip="${esc(`#${h.stepIndex} · ${isEn() ? meta.en : meta.zh}\n${h.label}\n~${fmtInt(h.estimatedTokens)} tok (${fmtPct(pct)}%)`)}">
-            <span class="badge" style="color:${meta.color};background:color-mix(in srgb,${meta.color} 14%,transparent)">#${fmtInt(h.stepIndex)}</span>
-            <span class="ctx-heavy-lbl">${esc(h.label)}</span>
-            <span class="ctx-heavy-val num">${fmtTok(h.estimatedTokens)} <span class="muted">(${fmtPct(pct)}%)</span></span>
-            <span class="bar"><i style="width:${pct}%;background:${meta.color}"></i></span>
-          </div>`;
-        }).join('') || `<div class="empty sm">${esc(L('暂无高占用步骤', 'No heavy steps yet'))}</div>`}
+      ${tdBar ? `<div class="stackbar">${tdBar}</div>` : ''}
+      ${tdGroupPills ? `<div class="td-summary-pills num">${tdGroupPills}</div>` : ''}
+      <div class="td-list">
+        ${tdTop.map((it) => tdRowHtml(it, tdMax, false)).join('') || `<div class="empty sm">${esc(L('暂无工具定义数据', 'No tool definition data'))}</div>`}
       </div>
+      ${tdItems.length > 8 ? `<div class="td-foot-more"><button type="button" class="ghost-btn" data-act="open-tool-defs" style="background:var(--c-fill);color:var(--c-fg)">${esc(L(`查看全部 ${tdItems.length} 项工具定义 →`, `View all ${tdItems.length} definitions →`))}</button></div>` : ''}
     </section>
 
     <div class="ctx-sess-foot num">
@@ -1783,24 +1851,135 @@ document.addEventListener('pointerleave', hideTip);
 addEventListener('scroll', hideTip, { passive: true, capture: true });
 
 /* ------------------------------------------------------------------ */
-/* Pricing drawer                                                      */
+/* Drawer (pricing / tool definitions)                                 */
 /* ------------------------------------------------------------------ */
-async function openDrawer() {
+async function openDrawer(mode = 'pricing') {
+  state.drawerMode = mode === 'toolDefs' ? 'toolDefs' : 'pricing';
   $('scrim').classList.remove('hidden');
   $('drawer').classList.remove('hidden');
-  $('drawer-close').focus();
   renderDrawer();
+  if (state.drawerMode === 'toolDefs') {
+    const inp = $('td-search');
+    if (inp) inp.focus();
+    else $('drawer-close').focus();
+    return;
+  }
+  $('drawer-close').focus();
   if (!state.pricing) {
     try { state.pricing = await getJson('/api/pricing'); } catch (e) { state.pricing = { error: e?.message || String(e) }; }
-    if (!$('drawer').classList.contains('hidden')) renderDrawer();
+    if (!$('drawer').classList.contains('hidden') && state.drawerMode === 'pricing') renderDrawer();
   }
 }
 function closeDrawer() {
+  const wasTd = state.drawerMode === 'toolDefs';
   $('scrim').classList.add('hidden');
   $('drawer').classList.add('hidden');
-  $('btn-info').focus();
+  const fallbackFocus = wasTd ? document.querySelector('[data-act="open-tool-defs"]') : $('btn-info');
+  (fallbackFocus || $('btn-info'))?.focus();
 }
+function renderToolDefsDrawerList() {
+  const host = $('td-drawer-list');
+  if (!host) return;
+  const td = state.context?.toolDefinitions;
+  if (!td) {
+    host.innerHTML = `<div class="empty sm">${esc(L('暂无工具定义数据', 'No tool definition data'))}</div>`;
+    return;
+  }
+  const q = state.tdSearch.trim().toLowerCase();
+  const filt = state.tdFilter;
+
+  if (state.tdView === 'groups') {
+    const groups = (td.byGroup || []).filter((g) => {
+      if (filt !== 'all' && g.kind !== filt) return false;
+      if (q && !g.group.toLowerCase().includes(q) && !g.kind.toLowerCase().includes(q)) return false;
+      return true;
+    });
+    const maxG = groups.length ? Math.max(...groups.map((g) => num(g.tokens)), 1) : 1;
+    host.innerHTML = groups.map((g) => {
+      const km = TD_KIND_META[g.kind] || { color: '#8a94a6', zh: g.kind, en: g.kind };
+      const kLabel = isEn() ? km.en : km.zh;
+      const barPct = clamp((num(g.tokens) / maxG) * 100, 0, 100);
+      return `<div class="td-group-row" data-tip="${esc(`${g.group} · ${kLabel}\n${fmtInt(g.count)} 项 · ~${fmtInt(g.tokens)} tok (${fmtPct(g.percent)}%)`)}">
+        <span class="badge" style="color:${km.color};background:color-mix(in srgb,${km.color} 14%,transparent)">${esc(kLabel)}</span>
+        <span class="td-main">
+          <span class="td-name">${esc(g.group)}</span>
+          <span class="td-group num">${fmtInt(g.count)} ${esc(L('项', 'items'))}</span>
+        </span>
+        <span class="td-val num">${fmtTok(g.tokens)} <span class="muted">(${fmtPct(g.percent)}%)</span></span>
+        <span class="bar"><i style="width:${barPct}%;background:${km.color}"></i></span>
+      </div>`;
+    }).join('') || `<div class="empty sm">${esc(L('没有匹配的插件或分组', 'No matching groups'))}</div>`;
+    return;
+  }
+
+  const items = (td.items || []).filter((it) => {
+    if (filt !== 'all' && it.kind !== filt) return false;
+    if (q) {
+      const hay = `${it.name} ${it.group} ${it.description || ''}`.toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    return true;
+  });
+  const maxTok = items.length ? Math.max(...items.map((x) => num(x.tokens)), 1) : 1;
+  host.innerHTML = items.map((it) => tdRowHtml(it, maxTok, true)).join('')
+    || `<div class="empty sm">${esc(L('没有匹配的工具定义', 'No matching tool definitions'))}</div>`;
+}
+
+function renderToolDefsDrawer() {
+  const titleEl = $('drawer-title');
+  if (titleEl) titleEl.textContent = L('工具定义明细', 'All Tool Definitions');
+  const body = $('drawer-body');
+  const td = state.context?.toolDefinitions;
+  if (!td) {
+    body.innerHTML = `<div class="empty sm">${esc(L('当前会话暂无工具定义统计', 'No tool definition data for this conversation'))}</div>`;
+    return;
+  }
+  const c = td.counts || {};
+  const kindTabs = [
+    ['all', `${L('全部', 'All')} ${fmtInt(c.total || 0)}`],
+    ['skill', `${L('技能', 'Skill')} ${fmtInt(c.skill || 0)}`],
+    ['builtin_tool', `${L('内置', 'Built-in')} ${fmtInt(c.builtin_tool || 0)}`],
+    ['rule', `${L('规则', 'Rule')} ${fmtInt(c.rule || 0)}`],
+    ['mcp', `MCP ${fmtInt(c.mcp || 0)}`],
+  ];
+  body.innerHTML = `
+    <div class="td-kpis num">
+      <div class="ctx-kpi">
+        <span class="k">${esc(L('定义总数', 'Definitions'))}</span>
+        <span class="v">${fmtInt(c.total)}</span>
+        <span class="s">${esc(L(`${fmtInt(c.skill)} 技能 · ${fmtInt(c.builtin_tool)} 内置 · ${fmtInt(c.rule)} 规则 · ${fmtInt(c.mcp)} MCP`, `${fmtInt(c.skill)} skills · ${fmtInt(c.builtin_tool)} built-in · ${fmtInt(c.rule)} rules · ${fmtInt(c.mcp)} MCP`))}</span>
+      </div>
+      <div class="ctx-kpi">
+        <span class="k">${esc(L('定义总占用', 'Total Overhead'))}</span>
+        <span class="v">${fmtTok(td.totalTokens)} tok</span>
+        <span class="s">${esc(L(`占上下文 ${fmtPct(td.shareOfContextPercent)}% · 占上限 ${fmtPct(td.shareOfLimitPercent)}%`, `${fmtPct(td.shareOfContextPercent)}% of ctx · ${fmtPct(td.shareOfLimitPercent)}% of limit`))}</span>
+      </div>
+    </div>
+    <div class="td-toolbar">
+      <div class="td-toolbar-row">
+        <div class="segmented" role="group" aria-label="${esc(L('视图模式', 'View mode'))}">
+          <button type="button" data-td-view="items" aria-pressed="${state.tdView === 'items'}">${esc(L('按单项', 'By Item'))}</button>
+          <button type="button" data-td-view="groups" aria-pressed="${state.tdView === 'groups'}">${esc(L('按插件分组', 'By Plugin'))}</button>
+        </div>
+        <input id="td-search" class="td-search" type="search" value="${esc(state.tdSearch)}" placeholder="${esc(L('搜索工具 / 技能 / 插件名…', 'Filter tool, skill, or plugin…'))}" aria-label="${esc(L('搜索工具定义', 'Search tool definitions'))}">
+      </div>
+      <div class="segmented" role="group" aria-label="${esc(L('类型筛选', 'Kind filter'))}">
+        ${kindTabs.map(([k, lbl]) => `<button type="button" data-td-filter="${k}" aria-pressed="${state.tdFilter === k}">${esc(lbl)}</button>`).join('')}
+      </div>
+    </div>
+    <div id="td-drawer-list" class="td-drawer-list"></div>
+    <div class="metric-hint">${esc(L('说明：技能与规则按磁盘/LS 注入文本实测估算（技能列表仅注入名称与简介，完整正文按需读取）；内置工具与 MCP 按参数规模参考估算。', 'Skills & rules are measured from injected headers/files (skill bodies load on demand); built-in tools & MCP servers use schema size estimates.'))}</div>
+  `;
+  renderToolDefsDrawerList();
+}
+
 function renderDrawer() {
+  if (state.drawerMode === 'toolDefs') {
+    renderToolDefsDrawer();
+    return;
+  }
+  const titleEl = $('drawer-title');
+  if (titleEl) titleEl.textContent = L('估算说明 · 计价权重', 'Pricing & Estimation');
   const p = state.pricing;
   const body = $('drawer-body');
   const d = state.details.get(state.selectedId);
@@ -1875,7 +2054,12 @@ document.addEventListener('click', (e) => {
   }
   const act = t.closest('[data-act]');
   if (act?.dataset.act === 'retry') { refresh({ force: true }); return; }
-  if (act?.dataset.act === 'reload-pricing') { state.pricing = null; openDrawer(); return; }
+  if (act?.dataset.act === 'reload-pricing') { state.pricing = null; openDrawer('pricing'); return; }
+  if (act?.dataset.act === 'open-tool-defs') { openDrawer('toolDefs'); return; }
+  const tdv = t.closest('[data-td-view]');
+  if (tdv) { state.tdView = tdv.dataset.tdView; renderToolDefsDrawer(); return; }
+  const tdf = t.closest('[data-td-filter]');
+  if (tdf) { state.tdFilter = tdf.dataset.tdFilter; renderToolDefsDrawer(); return; }
   const qsz = t.closest('[data-qsize]');
   if (qsz) { updateSettings({ quotaWidgetSize: qsz.dataset.qsize }); return; }
   const lg = t.closest('[data-lang]');
@@ -1890,6 +2074,12 @@ document.addEventListener('click', (e) => {
 document.addEventListener('toggle', (e) => {
   if (e.target.id === 'qd-models-det') state.modelsOpen = e.target.open;
 }, true);
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'td-search') {
+    state.tdSearch = e.target.value || '';
+    renderToolDefsDrawerList();
+  }
+});
 document.addEventListener('change', (e) => {
   if (e.target.id === 'sort') { state.sort = e.target.value; savePrefs(); renderHero(); applyHighlight(); }
   else if (e.target.id === 'swarm-pick') selectSwarm(e.target.value);
@@ -1940,7 +2130,7 @@ const iv = $('interval');
 if (![...iv.options].some((o) => +o.value === state.intervalMs)) state.intervalMs = 5000;
 iv.value = String(state.intervalMs);
 iv.addEventListener('change', () => { state.intervalMs = +iv.value; savePrefs(); setLive(); schedule(); });
-$('btn-info').addEventListener('click', openDrawer);
+$('btn-info').addEventListener('click', () => openDrawer('pricing'));
 $('drawer-close').addEventListener('click', closeDrawer);
 $('scrim').addEventListener('click', closeDrawer);
 document.addEventListener('keydown', (e) => {

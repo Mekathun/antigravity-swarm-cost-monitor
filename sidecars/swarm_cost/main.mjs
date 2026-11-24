@@ -375,14 +375,14 @@ async function tryStartWithSidecarSdk() {
 
   app.api(
     '/api/context',
-    (data) => {
+    async (data) => {
       const conversationId =
         data?.conversationId ||
         app.config?.conversationId ||
         process.env.ANTIGRAVITY_CONVERSATION_ID ||
         '';
       const force = isTruthyFlag(data?.force);
-      return getConversationContext({ conversationId, force });
+      return await getConversationContext({ conversationId, force });
     },
     'GET'
   );
@@ -501,7 +501,8 @@ function startStandaloneServer() {
         const conversationId =
           params.get('conversationId') || process.env.ANTIGRAVITY_CONVERSATION_ID || '';
         const force = isTruthyFlag(params.get('force'));
-        sendJson(res, 200, getConversationContext({ conversationId, force }));
+        const ctx = await getConversationContext({ conversationId, force });
+        sendJson(res, 200, ctx);
         return;
       }
 

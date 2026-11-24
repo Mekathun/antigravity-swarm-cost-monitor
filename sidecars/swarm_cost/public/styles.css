@@ -1188,3 +1188,106 @@ button { cursor: pointer; }
   background: var(--c-card);
   border: 1px solid var(--c-border);
 }
+
+/* Tool Definitions card + View All drawer */
+.td-summary-pills {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 8px;
+}
+.td-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+.td-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-radius: var(--r-md);
+  background: var(--c-field);
+  font-size: var(--t-xs);
+}
+.td-main {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  flex-wrap: wrap;
+}
+.td-name {
+  font-weight: 600;
+  color: var(--c-fg);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.td-group {
+  font-size: 10px;
+  color: var(--c-fg-muted);
+  white-space: nowrap;
+}
+.td-val {
+  font-weight: 600;
+  white-space: nowrap;
+  font-size: var(--t-2xs);
+  text-align: right;
+}
+.td-row .bar { grid-column: 1 / -1; height: 3.5px; }
+.td-foot-more {
+  margin-top: 10px;
+  display: flex;
+  justify-content: center;
+}
+
+.td-kpis {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+.td-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--c-line);
+}
+.td-toolbar-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.td-search {
+  flex: 1 1 140px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--c-border);
+  background: var(--c-card);
+  color: var(--c-fg);
+  font-size: var(--t-xs);
+}
+.td-search:focus { border-color: var(--c-primary); }
+.td-drawer-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.td-group-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  align-items: center;
+  padding: 7px 9px;
+  border-radius: var(--r-md);
+  background: var(--c-field);
+  font-size: var(--t-xs);
+}
+.td-group-row .bar { grid-column: 1 / -1; height: 4px; }
