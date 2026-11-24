@@ -1,0 +1,17 @@
+{
+  "name": "swarm-cost-monitor",
+  "displayName": "Swarm Cost Monitor",
+  "description": "Monitor per-Swarm and per-Worker token usage, multi-model cost breakdown, current conversation context window, and live Gemini/Claude account quotas in an Antigravity auxiliary pane (中文 / English).",
+  "version": "1.2.0",
+  "author": {
+    "name": "Mekathun",
+    "url": "https://github.com/Mekathun"
+  },
+  "repository": "https://github.com/Mekathun/antigravity-swarm-cost-monitor",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Open Swarm Cost Monitor to inspect current swarm spend and live quotas",
+    "Which worker is consuming the largest share of tokens and cost in this swarm?",
+    "Inspect the current conversation's context window usage and top token consumers"
+  ]
+}

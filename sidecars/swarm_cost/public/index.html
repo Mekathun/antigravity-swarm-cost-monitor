@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Swarm Cost Monitor</title>
+  <!-- Host bridge: syncs Antigravity theme tokens onto :root and exposes
+       window.sidecar (served by the host; harmless 404 when standalone). -->
+  <script src="/preload.js"></script>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <!-- Inline SVG icon sprite (no external assets). -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-logo" viewBox="0 0 16 16"><path d="M8 1.75a6.25 6.25 0 1 0 6.25 6.25H8z"/><path d="M10.25 1.9A6.27 6.27 0 0 1 14.1 5.75h-3.85z"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13.25 8a5.25 5.25 0 1 1-1.54-3.71"/><path d="M13.25 2.5v3h-3"/></symbol>
+    <symbol id="i-pause" viewBox="0 0 16 16"><path d="M5.75 3.5v9M10.25 3.5v9"/></symbol>
+    <symbol id="i-play" viewBox="0 0 16 16"><path d="M5 3.25v9.5L12.5 8z"/></symbol>
+    <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6.25"/><path d="M8 7.25v4M8 4.9v.1"/></symbol>
+    <symbol id="i-close" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+    <symbol id="i-alert" viewBox="0 0 16 16"><path d="M8 2.25 14.25 13H1.75z"/><path d="M8 6.5v3M8 11.25v.1"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 16 16"><path d="m6 3.75 4.25 4.25L6 12.25"/></symbol>
+    <symbol id="i-gauge" viewBox="0 0 16 16"><path d="M2.5 11.5a5.5 5.5 0 1 1 11 0"/><path d="M8 11.5 10.5 7"/></symbol>
+    <symbol id="i-hive" viewBox="0 0 16 16"><circle cx="8" cy="4" r="1.75"/><circle cx="3.75" cy="11.5" r="1.75"/><circle cx="12.25" cy="11.5" r="1.75"/><path d="M7 5.5 4.75 10M9 5.5l2.25 4.5M5.5 11.5h5"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.25"/><path d="M8 1.75v1.5M8 12.75v1.5M1.75 8h1.5M12.75 8h1.5M3.58 3.58l1.06 1.06M11.36 11.36l1.06 1.06M12.42 3.58l-1.06 1.06M4.64 11.36l-1.06 1.06"/></symbol>
+    <symbol id="i-chev-up" viewBox="0 0 16 16"><path d="m4 10 4-4 4 4"/></symbol>
+    <symbol id="i-chev-down" viewBox="0 0 16 16"><path d="m4 6 4 4 4-4"/></symbol>
+  </svg>
+
+  <header class="header" data-testid="cost-header">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true"><svg class="icon"><use href="#i-logo"/></svg></span>
+      <div class="brand-text">
+        <h1 class="title" id="brand-title">Swarm 花费监控</h1>
+        <span id="subtitle" class="subtitle">每个 Swarm / Worker 的花费与 Token 占比</span>
+      </div>
+    </div>
+    <span id="live" class="live busy" role="status" aria-live="polite" title="自动刷新状态">
+      <span class="live-dot" aria-hidden="true"></span><span id="live-label" class="live-label num">加载中</span>
+    </span>
+    <div class="controls">
+      <span class="select" title="自动刷新间隔">
+        <select id="interval" aria-label="自动刷新间隔" data-testid="cost-interval">
+          <option value="3000">3s</option>
+          <option value="5000" selected>5s</option>
+          <option value="10000">10s</option>
+          <option value="30000">30s</option>
+          <option value="60000">60s</option>
+        </select>
+      </span>
+      <button id="btn-pause" type="button" class="icon-btn" aria-pressed="false" title="暂停自动刷新" aria-label="暂停自动刷新" data-testid="cost-pause">
+        <svg class="icon"><use href="#i-pause"/></svg>
+      </button>
+      <button id="btn-refresh" type="button" class="icon-btn" title="立即刷新" aria-label="立即刷新" data-testid="cost-refresh">
+        <svg class="icon"><use href="#i-refresh"/></svg>
+      </button>
+      <button id="btn-info" type="button" class="icon-btn" title="估算说明 / 计价权重" aria-label="估算说明 / 计价权重" aria-haspopup="dialog" data-testid="cost-info">
+        <svg class="icon"><use href="#i-info"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist" aria-label="视图切换" data-testid="cost-tabs">
+    <button type="button" role="tab" id="tabbtn-swarm" data-tab="swarm" aria-controls="panel-swarm" aria-selected="true" class="tab active" data-testid="cost-tab-swarm">
+      <span id="lbl-tab-swarm">Swarm 花费</span>
+    </button>
+    <button type="button" role="tab" id="tabbtn-context" data-tab="context" aria-controls="panel-context" aria-selected="false" tabindex="-1" class="tab" data-testid="cost-tab-context">
+      <span id="lbl-tab-context">上下文窗口</span>
+      <span id="tab-ctx-badge" class="tab-badge num hidden"></span>
+    </button>
+  </nav>
+
+  <main class="main" id="main">
+    <div id="banner" class="banner hidden" role="alert" data-testid="cost-banner">
+      <svg class="icon"><use href="#i-alert"/></svg>
+      <span id="banner-text" class="banner-text"></span>
+      <button id="banner-retry" type="button" class="ghost-btn">重试</button>
+    </div>
+
+    <!-- Skeleton (first load only) -->
+    <div id="skeleton" aria-busy="true" aria-label="加载中">
+      <div class="kpis">
+        <span class="skel skel-card"></span><span class="skel skel-card"></span><span class="skel skel-card"></span><span class="skel skel-card"></span>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <span class="skel skel-line" style="width:34%;height:12px"></span>
+        <span class="skel skel-line" style="width:100%;height:10px;margin-top:12px;border-radius:999px"></span>
+        <span class="skel skel-line" style="width:82%;margin-top:14px"></span>
+        <span class="skel skel-line" style="width:64%;margin-top:8px"></span>
+      </div>
+      <div class="card" style="margin-top:12px;display:flex;gap:16px;align-items:center">
+        <span class="skel skel-circle" style="width:120px;height:120px;flex:none"></span>
+        <div style="flex:1;display:flex;flex-direction:column;gap:9px">
+          <span class="skel skel-line" style="width:90%"></span><span class="skel skel-line" style="width:70%"></span>
+          <span class="skel skel-line" style="width:80%"></span><span class="skel skel-line" style="width:55%"></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="content" class="hidden" style="display:contents">
+      <div id="panel-swarm" role="tabpanel" aria-labelledby="tabbtn-swarm" style="display:contents">
+        <section id="kpis" class="kpis" aria-label="总览" data-testid="cost-kpis"></section>
+
+        <div id="empty" class="card hidden" data-testid="cost-empty"></div>
+
+        <div id="layout" class="grid-2">
+          <section id="hero" class="card" aria-label="Worker 花费占比" data-testid="cost-hero"></section>
+          <div class="stack">
+            <section id="swarms" class="card" aria-label="Swarm 花费占比" data-testid="cost-swarms"></section>
+            <section id="models" class="card" aria-label="模型分布" data-testid="cost-models"></section>
+            <section id="timeline" class="card hidden" aria-label="花费时间线" data-testid="cost-timeline"></section>
+          </div>
+        </div>
+      </div>
+
+      <div id="panel-context" class="hidden" role="tabpanel" aria-labelledby="tabbtn-context" data-testid="cost-context-panel"></div>
+    </div>
+  </main>
+
+  <!-- Docked bottom-left Quota Monitor + Plugin Settings bar (Codex-style placement) -->
+  <footer class="dock" id="dock" data-testid="cost-dock">
+    <div id="quota-dock" class="quota-dock" data-size="mini" data-testid="cost-quota" aria-label="实时额度监控"></div>
+
+    <div class="dock-bar" id="settings-bar">
+      <button id="btn-settings" type="button" class="dock-settings-btn" aria-expanded="false" aria-haspopup="dialog" aria-controls="settings-pop" data-testid="cost-settings-btn">
+        <svg class="icon sm" aria-hidden="true"><use href="#i-settings"/></svg>
+        <span id="lbl-settings">设置</span>
+      </button>
+      <span id="dock-meta" class="dock-meta num"></span>
+    </div>
+
+    <!-- Upward Settings Popover -->
+    <div id="settings-pop" class="settings-pop hidden" role="dialog" aria-label="插件设置" data-testid="cost-settings-popover">
+      <div class="sp-head">
+        <span class="sp-title" id="sp-title">监控设置</span>
+        <span id="sp-status" class="sp-status"></span>
+        <button id="sp-close" type="button" class="icon-btn" style="width:24px;height:24px" aria-label="关闭设置"><svg class="icon sm"><use href="#i-close"/></svg></button>
+      </div>
+      <div class="sp-group">
+        <span class="sp-label" id="sp-size-label">额度显示大小</span>
+        <div class="segmented sp-seg" role="group" aria-label="额度显示大小" data-testid="cost-quota-size-seg">
+          <button type="button" data-qsize="mini" aria-pressed="true" id="btn-qsize-mini" title="双 3/4 圆环仪表">最小</button>
+          <button type="button" data-qsize="compact" aria-pressed="false" id="btn-qsize-compact" title="双列紧凑进度条">紧凑</button>
+          <button type="button" data-qsize="expanded" aria-pressed="false" id="btn-qsize-expanded" title="完整多横条面板">最大</button>
+        </div>
+        <span id="sp-size-hint" class="sp-hint">双 3/4 圆环仪表，紧贴设置上方</span>
+      </div>
+      <label class="sp-check" for="opt-weekly">
+        <input id="opt-weekly" type="checkbox" data-testid="cost-show-weekly">
+        <span class="sp-check-box" aria-hidden="true"></span>
+        <span class="sp-check-text">
+          <span class="sp-check-title" id="sp-weekly-title">显示周额度</span>
+          <span class="sp-hint" id="sp-weekly-hint">展示官方周限状态与近 7 天本地用量</span>
+        </span>
+      </label>
+      <div class="sp-group">
+        <span class="sp-label" id="sp-lang-label">界面语言 · Language</span>
+        <div class="segmented sp-seg-2" role="group" aria-label="Language" data-testid="cost-lang-seg">
+          <button type="button" data-lang="zh" aria-pressed="true">中文</button>
+          <button type="button" data-lang="en" aria-pressed="false">English</button>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <div id="tip" class="tip" role="tooltip"></div>
+
+  <div id="scrim" class="scrim hidden"></div>
+  <aside id="drawer" class="drawer hidden" role="dialog" aria-modal="true" aria-labelledby="drawer-title" data-testid="cost-pricing-drawer">
+    <div class="drawer-head">
+      <h2 id="drawer-title">估算说明 · 计价权重</h2>
+      <button id="drawer-close" type="button" class="icon-btn" aria-label="关闭"><svg class="icon"><use href="#i-close"/></svg></button>
+    </div>
+    <div id="drawer-body" class="drawer-body"></div>
+  </aside>
+  <script src="/app.js"></script>
+</body>
+</html>

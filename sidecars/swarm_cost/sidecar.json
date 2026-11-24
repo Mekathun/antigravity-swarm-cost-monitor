@@ -1,0 +1,22 @@
+{
+  "command": "node",
+  "args": ["main.mjs"],
+  "env": {},
+  "restart_policy": "always",
+  "display_name": "Swarm Cost Monitor",
+  "description": "Live per-Swarm and per-Worker cost share, multi-model breakdown, current conversation context window, and account quota gauge.",
+  "has_web_ui": true,
+  "agent_permissions": {
+    "allows_user_interactions": false
+  },
+  "ui_config": {
+    "display_name": "Swarm Cost Monitor",
+    "views": [
+      {
+        "path": "/",
+        "entrypoint": "SIDECAR_UI_ENTRYPOINT_AUX_PANE",
+        "title": "Swarm Cost"
+      }
+    ]
+  }
+}
